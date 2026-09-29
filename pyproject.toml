@@ -1,0 +1,26 @@
+[project]
+name = "forestsize"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "ImEvolutiON", email = "imevolutionmodding@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "ecophylo",
+    "numpy>=2.5.3",
+    "pandas>=3.0.6",
+    "torch>=2.14.0",
+    "torchsummary>=1.5.1",
+]
+
+[project.scripts]
+forestsize = "forestsize:main"
+
+[build-system]
+requires = ["uv_build>=0.12.20,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+ecophylo = { git = "https://github.com/ImEvolutiON/ecophylo.git", branch = "ecophylo-paraphyletic" }
