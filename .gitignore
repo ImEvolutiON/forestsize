@@ -8,3 +8,9 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Logs
+bench_err.txt
+*.err
+slurm-*.out
+slurm-*.err
