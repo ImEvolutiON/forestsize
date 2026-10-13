@@ -2,7 +2,8 @@ import time
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
-from forestsize.simulation import simulation, n_sad_bin
+from forestsize.simulation import SumStat
+from forestsize.parameters import SAMPLE_SIZE
 
 
 
@@ -18,12 +19,13 @@ class SimDataset(Dataset):
     def __getitem__(self, index):
         sim_id = self.sim_ids[index]
         
-        params, tree, sad = simulation(sim_id)
+        theta, _, _, SAD, LTT, seeds = SumStat(sim_id)
         
-        sad = torch.from_numpy(np.log1p(sad))
-        params = torch.from_numpy(np.log10(params))
+        SAD = torch.from_numpy(np.log1p(SAD))
+        LTT = torch.from_numpy(LTT)
+        theta = torch.from_numpy(np.log10(theta))
         
-        return params, sad
+        return theta, SAD, LTT
 
 
 
@@ -32,7 +34,7 @@ class EcoEvoModel(torch.nn.Module):
     def __init__(self):
         super().__init__()
         
-        self.fc1 = torch.nn.Linear(n_sad_bin, 64)
+        self.fc1 = torch.nn.Linear(SAMPLE_SIZE, 64)
         self.act = torch.nn.ReLU()
         self.fc2 = torch.nn.Linear(64, 4)
         

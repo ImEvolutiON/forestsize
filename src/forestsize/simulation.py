@@ -1,127 +1,88 @@
-import sys
+import copy
 import ecophylo
-import numpy as np
-import csv
-
-MASTER_SEED = 123456789
-MAX_ABUND = 50000
-SAD_BASE = 1.1
-
-x = np.arange(1, MAX_ABUND + 1)
-y = (np.log(x) / np.log(SAD_BASE)).round().astype(int)
-_, x_to_bin = np.unique(y, return_inverse=True)
-n_sad_bin = x_to_bin.max()+1
+from ecophylo.phylogen import toPhylo
+from forestsize.parameters import sample_parameters, log_writer, MASTER_SEED, SAMPLE_SIZE
 
 
-def log_writer(error_type, sim_id, mu_seed, No_seed, k1_seed, k2_seed, tree_seed, mu, No, k1, k2):
-    writer = csv.writer(sys.stderr)
-    writer.writerow([error_type,
-                     sim_id, 
-                     mu_seed, 
-                     No_seed, 
-                     k1_seed, 
-                     k2_seed, 
-                     tree_seed, 
-                     mu, 
-                     No, 
-                     k1, 
-                     k2])
+def genealogy(sim_id):
     
+    theta, sample_size, changetimes, com_size, seeds = sample_parameters(sim_id)
+    
+    if theta is None or com_size is None:
+        # No need to call log_writer as it was already called in parameters.py
+        return None, None, None
 
-def simulation(sim_id):
-    
-    rng = np.random.default_rng(np.random.SeedSequence([MASTER_SEED, sim_id]))
-    
-    while True:
-        
-        mu_seed = int(rng.integers(1, 2**32))
-        mu = ecophylo.sample(
-            lower = 1e-7,
-            upper = 1e-3,
-            distr = "log_unif",
-            seed = mu_seed
-        )
-        
-        No_seed = int(rng.integers(1, 2**32))
-        No = ecophylo.sample(
-            lower = 1e7,
-            upper = 1e12,
-            distr = "log_unif",
-            seed = No_seed
-        )
-        
-        k1_seed = int(rng.integers(1, 2**32))
-        k1 = ecophylo.sample(
-            lower = 0.01,
-            upper = 100,
-            distr = "log_unif",
-            seed = k1_seed
-            )
-        
-        k2_seed = int(rng.integers(1, 2**32))
-        k2 = ecophylo.sample(
-            lower = 0.01,
-            upper = 100,
-            distr = "log_unif",
-            seed = k2_seed
-            )
-        
-        deme_sizes = [[
-            No,
-            No * k1,
-            No * k1 * k2
-        ]]
-        
-        if min(deme_sizes[0]) < MAX_ABUND:
-            log_writer(error_type = "Ne_lower_than_sampling",
-                       sim_id = sim_id,
-                       mu_seed = mu_seed,
-                       No_seed = No_seed,
-                       k1_seed = k1_seed,
-                       k2_seed = k2_seed,
-                       tree_seed = "None",
-                       mu = mu,
-                       No = No,
-                       k1 = k1,
-                       k2 = k2)
-            continue
-        
-        changetimes = [[0, 98, 677]]
-        
-        tree_seed = int(rng.integers(1, 2**32))
-        tree = ecophylo.simulate(
-            samples = MAX_ABUND,
-            deme_sizes = deme_sizes,
-            mu = mu,
+    try:
+        G = ecophylo.simulate(
+            samples = sample_size,
+            deme_sizes = com_size,
+            mu = theta[0],
             changetimes = changetimes,
-            spmodel = "loose",
+            spmodel = "genealogy",
             tau = 0,
-            seed = tree_seed,
+            seed = seeds["G_seed"],
             verbose = False
         )
-                
-        abund = np.array(ecophylo.getAbund(tree))
+    except Exception as error:
+        log_writer(
+            error_type= f'Genealogy error : {error}',
+            master_seed = MASTER_SEED,
+            sim_id = sim_id,
+            theta = theta,
+            seeds = seeds)
         
-        if np.any((abund < 1) | (abund > MAX_ABUND)):
-            log_writer(error_type = "Invalid_abundance",
-                       sim_id = sim_id,
-                       mu_seed = mu_seed,
-                       No_seed = No_seed,
-                       k1_seed = k1_seed,
-                       k2_seed = k2_seed,
-                       tree_seed = tree_seed,
-                       mu = mu,
-                       No = No,
-                       k1 = k1,
-                       k2 = k2)
-            continue
-        
-        bin_ids = x_to_bin[abund - 1]
-        sad = np.bincount(
-            bin_ids,
-            minlength = n_sad_bin
-            ).astype(np.float32)
-        
-        params = np.array([mu, No, k1, k2], dtype=np.float32)
+        return theta, None, seeds
     
-        return params, tree, sad
+    return theta, G, seeds
+
+
+def speciation(sim_id):
+    
+    theta, G, seeds = genealogy(sim_id)
+    
+    if G is None:
+        # No need to call log_writer as it was already called in oracle()
+        return None
+    
+    try:
+        T = toPhylo(
+            tree = copy.deepcopy(G),
+            mu = theta[0],
+            tau = 0,
+            spmodel = "loose",
+            seed = seeds["T_seed"])
+        
+    except Exception as error:
+        log_writer(
+            error_type = f'Speciation error : {error}',
+            master_seed = MASTER_SEED,
+            sim_id = sim_id,
+            theta = theta,
+            seeds = seeds)
+        
+        return theta, None, seeds
+    
+    return theta, G, T, seeds
+
+
+def SumStat(sim_id):
+    
+    theta, G, T, seeds = speciation(sim_id)
+    
+    if T is None:
+        return None, None
+    
+    if any(a < 1 or a > SAMPLE_SIZE for a in ecophylo.getAbund(T)):
+        log_writer(
+            error_type = "Invalid Abundance",
+            master_seed = MASTER_SEED,
+            sim_id = sim_id,
+            theta = theta,
+            seeds = seeds)
+        
+        return None, None
+        
+    SAD = ecophylo.getSAD(T, method="exact")
+    LTT = ecophylo.getLTT(T)
+    
+    return theta, G, T, SAD, LTT, seeds

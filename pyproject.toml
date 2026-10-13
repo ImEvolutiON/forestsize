@@ -28,3 +28,8 @@ build-backend = "uv_build"
 
 [tool.uv.sources]
 ecophylo = { git = "https://github.com/ImEvolutiON/ecophylo.git", branch = "ecophylo-paraphyletic" }
+
+[dependency-groups]
+dev = [
+    "spyder-kernels==3.1.*",
+]
