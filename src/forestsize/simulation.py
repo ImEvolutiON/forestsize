@@ -11,7 +11,7 @@ def genealogy(sim_id):
     
     if theta is None or com_size is None:
         # No need to call log_writer as it was already called in parameters.py
-        return None, None, None
+        return None, None, None, None
 
     try:
         G = ecophylo.simulate(
@@ -33,7 +33,7 @@ def genealogy(sim_id):
             hypothesis = hypothesis,
             seeds = seeds)
         
-        return theta, None, seeds
+        return theta, None, hypothesis, seeds
     
     return theta, G, hypothesis, seeds
 
@@ -43,8 +43,8 @@ def speciation(sim_id):
     theta, G, hypothesis, seeds = genealogy(sim_id)
     
     if G is None:
-        # No need to call log_writer as it was already called in oracle()
-        return theta, None, None, seeds
+        # No need to call log_writer as it was already called in genealogy()
+        return theta, None, None, hypothesis, seeds
     
     try:
         T = toPhylo(
@@ -63,7 +63,7 @@ def speciation(sim_id):
             hypothesis = hypothesis,
             seeds = seeds)
         
-        return theta, G, None, seeds
+        return theta, G, None, hypothesis, seeds
     
     return theta, G, T, hypothesis, seeds
 
@@ -73,7 +73,7 @@ def SumStat(sim_id):
     theta, G, T, hypothesis, seeds = speciation(sim_id)
     
     if T is None:
-        return theta, G, T, None, None, seeds
+        return theta, G, T, None, None, hypothesis, seeds
     
     if any(a < 1 or a > SAMPLE_SIZE for a in ecophylo.getAbund(T)):
         log_writer(
@@ -84,7 +84,7 @@ def SumStat(sim_id):
             hypothesis = hypothesis,
             seeds = seeds)
         
-        return theta, G, T, None, None, seeds
+        return theta, G, T, None, None, hypothesis, seeds
     
     try:
         SAD = ecophylo.getSAD(T, method="exact")
@@ -97,6 +97,6 @@ def SumStat(sim_id):
             theta = theta,
             hypothesis = hypothesis,
             seeds = seeds)
-        return theta, G, T, None, None, seeds
+        return theta, G, T, None, None, hypothesis, seeds
     
     return theta, G, T, SAD, LTT, hypothesis, seeds

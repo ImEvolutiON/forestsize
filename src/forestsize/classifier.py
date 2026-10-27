@@ -3,13 +3,13 @@ from torch import nn
 from torch.utils.data import Dataset
 
 from forestsize.simulation import SumStat
-from forestisize.parameters import H0, H1, CHANGETIMES
+from forestsize.parameters import H0, H1, CHANGETIMES
 
 def classifier_sim(sim_id):
     
     hypothesis = sim_id % 2
     
-    theta, G, T, SAD, LTT, seeds = SumStat(sim_id)
+    theta, G, T, SAD, LTT, hypothesis, seeds = SumStat(sim_id)
     
     if G is None:
         return None

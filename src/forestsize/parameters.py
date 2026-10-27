@@ -33,6 +33,7 @@ def sample_parameters(sim_id):
             error_type="Invalid Prior : Ne(t) contains a value smaller than the sampling size",
             master_seed = MASTER_SEED,
             sim_id = sim_id,
+            hypothesis = hypothesis,
             theta = theta)
         
         return None, SAMPLE_SIZE, CHANGETIMES, com_size, None
