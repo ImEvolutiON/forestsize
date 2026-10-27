@@ -2,17 +2,20 @@ import numpy as np
 import csv
 import sys
 
-    
+
 MASTER_SEED = 123456
 SAMPLE_SIZE = 50000
 CHANGETIMES = [[0, 98, 677]]
 
-
-def sample_parameters(sim_id):
+def sample_parameters(sim_id, mode="inference"):
+    
+    if mode not in ("inference", "classifier"):
+        raise ValueError("mode of analysis must be inference or classifier.")
     
     rng = np.random.default_rng(np.random.SeedSequence([MASTER_SEED, sim_id]))
     
     mu = 10 ** rng.uniform(-7.0, -3.0)
+    
     N0 = 10 ** rng.uniform(3.0, 16.0)
     N1 = 10 ** rng.uniform(3.0, 16.0)
     N2 = 10 ** rng.uniform(3.0, 16.0)
