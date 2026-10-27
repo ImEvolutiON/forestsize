@@ -371,7 +371,7 @@ wheels = [
 [[package]]
 name = "ecophylo"
 version = "0.1.6"
-source = { git = "https://github.com/ImEvolutiON/ecophylo.git?branch=ecophylo-paraphyletic#a3fc0f232253fe9340191846a5d4906c5c72686e" }
+source = { git = "https://github.com/ImEvolutiON/ecophylo.git?branch=ecophylo-paraphyletic#c663de5b85cde3cc935ce298f238855178342c9c" }
 dependencies = [
     { name = "requests" },
     { name = "setuptools" },

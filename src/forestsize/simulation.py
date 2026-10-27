@@ -1,4 +1,5 @@
 import copy
+import numpy as np
 import ecophylo
 from ecophylo.phylogen import toPhylo
 from forestsize.parameters import sample_parameters, log_writer, MASTER_SEED, SAMPLE_SIZE
@@ -6,7 +7,7 @@ from forestsize.parameters import sample_parameters, log_writer, MASTER_SEED, SA
 
 def genealogy(sim_id):
     
-    theta, sample_size, changetimes, com_size, seeds = sample_parameters(sim_id)
+    theta, sample_size, changetimes, com_size, hypothesis, seeds = sample_parameters(sim_id)
     
     if theta is None or com_size is None:
         # No need to call log_writer as it was already called in parameters.py
@@ -29,20 +30,21 @@ def genealogy(sim_id):
             master_seed = MASTER_SEED,
             sim_id = sim_id,
             theta = theta,
+            hypothesis = hypothesis,
             seeds = seeds)
         
         return theta, None, seeds
     
-    return theta, G, seeds
+    return theta, G, hypothesis, seeds
 
 
 def speciation(sim_id):
     
-    theta, G, seeds = genealogy(sim_id)
+    theta, G, hypothesis, seeds = genealogy(sim_id)
     
     if G is None:
         # No need to call log_writer as it was already called in oracle()
-        return None
+        return theta, None, None, seeds
     
     try:
         T = toPhylo(
@@ -58,19 +60,20 @@ def speciation(sim_id):
             master_seed = MASTER_SEED,
             sim_id = sim_id,
             theta = theta,
+            hypothesis = hypothesis,
             seeds = seeds)
         
-        return theta, None, seeds
+        return theta, G, None, seeds
     
-    return theta, G, T, seeds
+    return theta, G, T, hypothesis, seeds
 
 
 def SumStat(sim_id):
     
-    theta, G, T, seeds = speciation(sim_id)
+    theta, G, T, hypothesis, seeds = speciation(sim_id)
     
     if T is None:
-        return None, None
+        return theta, G, T, None, None, seeds
     
     if any(a < 1 or a > SAMPLE_SIZE for a in ecophylo.getAbund(T)):
         log_writer(
@@ -78,11 +81,22 @@ def SumStat(sim_id):
             master_seed = MASTER_SEED,
             sim_id = sim_id,
             theta = theta,
+            hypothesis = hypothesis,
             seeds = seeds)
         
-        return None, None
-        
-    SAD = ecophylo.getSAD(T, method="exact")
-    LTT = ecophylo.getLTT(T)
+        return theta, G, T, None, None, seeds
     
-    return theta, G, T, SAD, LTT, seeds
+    try:
+        SAD = ecophylo.getSAD(T, method="exact")
+        LTT = np.array(ecophylo.getLTT(T).get("time"), dtype=np.float64) # ATTENTION LTT = PADDING NEEDED ; MAYBE USING TIME SPLITS ?
+    except Exception as error:
+        log_writer(
+            error_type = f'SumStat error : {error}',
+            master_seed = MASTER_SEED,
+            sim_id = sim_id,
+            theta = theta,
+            hypothesis = hypothesis,
+            seeds = seeds)
+        return theta, G, T, None, None, seeds
+    
+    return theta, G, T, SAD, LTT, hypothesis, seeds
