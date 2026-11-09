@@ -11,15 +11,15 @@ def sample_parameters(sim_id):
     
     rng = np.random.default_rng(np.random.SeedSequence([MASTER_SEED, sim_id]))
     
-    mu = 10 ** rng.uniform(-7.0, -3.0)
+    mu = rng.uniform(-7.0, -3.0)
     
-    N0 = 10 ** rng.uniform(3.0, 16.0)
-    N1 = 10 ** rng.uniform(3.0, 16.0)
-    N2 = 10 ** rng.uniform(3.0, 16.0)
+    N0 = rng.uniform(np.log10(SAMPLE_SIZE+1), 16.0)
+    N1 = rng.uniform(np.log10(SAMPLE_SIZE+1), 16.0)
+    N2 = rng.uniform(np.log10(SAMPLE_SIZE+1), 16.0)
     
     theta = np.array([mu, N0, N1, N2], dtype = np.float64)
     
-    com_size = [[N0, N1, N2]]
+    com_size = [[10**N0, 10**N1, 10**N2]]
     
     if min(com_size[0]) < SAMPLE_SIZE:
         log_writer(
@@ -37,11 +37,13 @@ def sample_parameters(sim_id):
              "T_seed": T_seed,
              "ind_sampling_seed": ind_sampling_seed}
     
+    seeds["retries"] = rng.integers(1, 2**32, size=30).tolist() # a list of 30 fallback seeds
+    
     return theta, SAMPLE_SIZE, CHANGETIMES, com_size, seeds
 
 
 def log_writer(error_type, master_seed, sim_id, theta, seeds=None):
-    mu, N0, N1, N2 = theta
+    mu, N0, N1, N2 = 10**theta
     
     if seeds is None:
         seeds = {}
