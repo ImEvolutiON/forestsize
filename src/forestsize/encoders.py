@@ -100,3 +100,16 @@ class EncoderG(torch.nn.Module):
     # Ici soit un NN pour apprendre G, soit directement l'oracle distribution des temps de coalescence
     pass
 
+class ConcatFeatures(torch.nn.Module):
+    
+    def __init__(self, encoder1, encoder2):
+        super().__init__()
+        self.encoder1 = encoder1
+        self.encoder2 = encoder2
+        
+    def forward(self, features):
+        x1, x2 = features
+        embedding1 = self.encoder1(x1)
+        embedding2 = self.encoder2(x2)
+        
+        return torch.cat((embedding1, embedding2), dim=1)
