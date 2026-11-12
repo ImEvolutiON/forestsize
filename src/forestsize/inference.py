@@ -4,6 +4,7 @@ import csv
 from itertools import product
 import numpy as np
 import torch
+import psutil
 from sbi.neural_nets import posterior_nn
 from torch.utils.data import Dataset, DataLoader
 from forestsize.simulation import SumStat
@@ -42,27 +43,19 @@ class EcoEvoModel(torch.nn.Module):
         embedding = self.embedding_net(features)                   # Compute embeddings from the features of the current batch
         loss = self.normalizing_flow.loss(theta, embedding).mean() # Mean NPE loss over the batch
         return loss
-    
 
 def ram_used(pid):
     try:
-        with open(f"/proc/{pid}/status") as f:
-            for line in f:
-                if line.startswith("VmRSS:"):
-                    return int(line.split()[1]) / 1024
-    except (FileNotFoundError, ProcessLookupError):
-        pass
-
-    return 0.0
+        return psutil.Process(pid).memory_info().rss / 1024**2
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return 0.0
 
 
 def total_ram():
-    pid = os.getpid()
+    process = psutil.Process(os.getpid())
+    workers = process.children(recursive=True)
 
-    with open(f"/proc/{pid}/task/{pid}/children") as f:
-        workers = [int(p) for p in f.read().split()]
-
-    return ram_used(pid) + sum(ram_used(p) for p in workers)
+    return ram_used(process.pid) + sum(ram_used(p.pid) for p in workers)
 
 def benchmark():
 
