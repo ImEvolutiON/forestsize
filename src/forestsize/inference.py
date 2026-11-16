@@ -1,10 +1,6 @@
 import time
-import os
-import csv
-from itertools import product
 import numpy as np
 import torch
-import psutil
 from sbi.neural_nets import posterior_nn
 from torch.utils.data import Dataset, DataLoader
 from forestsize.simulation import SumStat
@@ -26,7 +22,7 @@ class SimDataset(Dataset):
         if any(level is None for level in (theta, G, T, SAD, LTT)):
             raise RuntimeError(f"Incomplete simulation: sim_id={sim_id}")
                 
-        return theta, G, T, SAD, LTT
+        return theta, SAD, LTT#, G, T, 
 
 
 class EcoEvoModel(torch.nn.Module):
@@ -42,140 +38,9 @@ class EcoEvoModel(torch.nn.Module):
     def loss(self, theta, features):
         embedding = self.embedding_net(features)                   # Compute embeddings from the features of the current batch
         loss = self.normalizing_flow.loss(theta, embedding).mean() # Mean NPE loss over the batch
-        return loss
+        return loss    
 
-def ram_used(pid):
-    try:
-        return psutil.Process(pid).memory_info().rss / 1024**2
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
-        return 0.0
-
-
-def total_ram():
-    process = psutil.Process(os.getpid())
-    workers = process.children(recursive=True)
-
-    return ram_used(process.pid) + sum(ram_used(p.pid) for p in workers)
-
-def benchmark():
-
-    # Fixed simulation budget
-    n_train = 32
-    n_val = 8
-    n_epochs = 1
-
-    # Parameters to benchmark
-    batch_sizes = [8, 16, 32]
-    worker_counts = [2, 4]
-    prefetch_factors = [1, 2]
-
-    configurations = list(product(
-        batch_sizes,
-        worker_counts,
-        prefetch_factors
-    ))
-
-    results = []
-
-    for i, (batch_size, n_workers, prefetch_factor) in enumerate(configurations, 1):
-
-        print(
-            f"\nConfiguration {i}/{len(configurations)} | "
-            f"Batch: {batch_size} | "
-            f"Workers: {n_workers} | "
-            f"Prefetch: {prefetch_factor}",
-            flush=True
-        )
-
-        # Same neural network initialization for each configuration
-        torch.manual_seed(123456)
-
-        # Reset GPU memory statistics
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-            torch.cuda.reset_peak_memory_stats()
-
-        start = time.perf_counter()
-
-        # Training and validation
-        wait_times, train_times, observed_ram = ModelTraining(
-            n_train=n_train,
-            n_val=n_val,
-            n_epochs=n_epochs,
-            n_workers=n_workers,
-            batch_size=batch_size,
-            prefetch_factor=prefetch_factor
-        )
-
-        # GPU measurements
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-            peak_vram = torch.cuda.max_memory_allocated() / 1024**2
-        else:
-            peak_vram = 0.0
-
-        elapsed = time.perf_counter() - start
-
-        # Total simulation throughput (training + validation)
-        n_simulations = (n_train + n_val) * n_epochs
-        throughput = n_simulations / elapsed
-
-        # Store measurements
-        results.append({
-            "batch_size": batch_size,
-            "n_workers": n_workers,
-            "prefetch_factor": prefetch_factor,
-            "elapsed_s": elapsed,
-            "simulations_per_second": throughput,
-            "observed_ram_mib": observed_ram,
-            "peak_vram_mib": peak_vram,
-            "mean_wait_s": float(np.mean(wait_times)),
-            "mean_train_s": float(np.mean(train_times))
-        })
-
-    # Save benchmark results after each configuration
-    with open("benchmark_results.csv", "w", newline="") as file:
-        writer = csv.DictWriter(file, fieldnames=results[0].keys())
-        writer.writeheader()
-        writer.writerows(results)
-
-    # Sort configurations by execution time
-    ranked = sorted(results, key=lambda x: x["elapsed_s"])
-
-    # Generate final report
-    lines = [
-        "========== FORESTSIZE BENCHMARK ==========",
-        f"Configurations tested: {len(configurations)}",
-        f"Training simulations per configuration: {n_train}",
-        f"Validation simulations per configuration: {n_val}",
-        ""
-    ]
-
-    for rank, result in enumerate(ranked, 1):
-        lines.append(
-            f"{rank}. "
-            f"Batch={result['batch_size']} | "
-            f"Workers={result['n_workers']} | "
-            f"Prefetch={result['prefetch_factor']} | "
-            f"Time={result['elapsed_s']:.2f}s | "
-            f"Throughput={result['simulations_per_second']:.3f} sim/s | "
-            f"RAM={result['observed_ram_mib']:.2f} MiB | "
-            f"VRAM={result['peak_vram_mib']:.2f} MiB | "
-            f"Wait={result['mean_wait_s']:.2f}s | "
-            f"Train={result['mean_train_s']:.2f}s"
-        )
-
-    report = "\n".join(lines)
-
-    print("\n" + report)
-
-    with open("benchmark_report.txt", "w") as file:
-        file.write(report + "\n")
-
-    return results
-    
-
-def ModelTraining(n_train=100, n_val=20, n_epochs=2, n_workers=0, batch_size=8, prefetch_factor=2):
+def ModelTraining(n_train=100, n_val=20, n_epochs=2, n_workers=0, batch_size=8, prefetch_factor=2, *, benchmark_run=False):
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
@@ -253,7 +118,7 @@ def ModelTraining(n_train=100, n_val=20, n_epochs=2, n_workers=0, batch_size=8, 
     
     wait_times = []
     train_times = []
-    ram_measurements = []
+    n_train_seen = 0
     
     # Epoch     
     for epoch in range(n_epochs):      
@@ -284,7 +149,6 @@ def ModelTraining(n_train=100, n_val=20, n_epochs=2, n_workers=0, batch_size=8, 
             
             wait_time = time.perf_counter() - wait_start # time to fill a batch
             wait_times.append(wait_time)
-            ram_measurements.append(total_ram())
             
             batch = [simulation for simulation in batch if simulation is not None]
     
@@ -292,7 +156,7 @@ def ModelTraining(n_train=100, n_val=20, n_epochs=2, n_workers=0, batch_size=8, 
                 continue
     
             # Data curations
-            theta, train_G, train_T, train_SAD, train_LTT = zip(*batch)
+            theta, train_SAD, train_LTT = zip(*batch) # train_G, train_T,
                 # transforms the list batch = 
                 # [(theta_1, G_1, T_1, SAD_1, LTT_1),
                 #  (theta_2, G_2, T_2, SAD_2, LTT_2),
@@ -360,6 +224,8 @@ def ModelTraining(n_train=100, n_val=20, n_epochs=2, n_workers=0, batch_size=8, 
             loss_rawSAD_joint_embLTT = EcoEvo_rawSAD_joint_embLTT.loss(theta_scaled, (train_SAD, train_LTT)) # pass LTT -> EncoderLTT -> embedding (LTT) -> NPE posterior conditionned on embedding
             loss_rawSAD_joint_embLTT.backward() # compute gradient
             optim_rawSAD_joint_embLTT.step() # update weights of both networks
+            
+            n_train_seen += len(batch)
 
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
@@ -395,7 +261,7 @@ def ModelTraining(n_train=100, n_val=20, n_epochs=2, n_workers=0, batch_size=8, 
             for batch in val_loader:
                 
                 # Data curations
-                theta, val_G, val_T, val_SAD, val_LTT = zip(*batch)
+                theta, val_SAD, val_LTT = zip(*batch) # val_G, val_T,
                 val_SAD = torch.as_tensor(
                     np.stack(val_SAD),
                     dtype=torch.float32,
@@ -448,6 +314,10 @@ def ModelTraining(n_train=100, n_val=20, n_epochs=2, n_workers=0, batch_size=8, 
             print(f"Validation loss raw SAD: {val_loss_rawSAD:.4f}")
             print(f"Validation loss raw SAD + embedding LTT: {val_loss_rawSAD_joint_embLTT:.4f}")
         
+        # Don't save weights if in benchmark_run
+        if benchmark_run:
+            continue
+        
         # Save model weights when validation loss improves
         if val_loss_embSAD < best_val_embSAD:
             best_val_embSAD = val_loss_embSAD
@@ -464,5 +334,17 @@ def ModelTraining(n_train=100, n_val=20, n_epochs=2, n_workers=0, batch_size=8, 
         if val_loss_rawSAD_joint_embLTT < best_val_rawSAD_joint_embLTT:
             best_val_rawSAD_joint_embLTT = val_loss_rawSAD_joint_embLTT
             torch.save(EcoEvo_rawSAD_joint_embLTT.state_dict(), "best_rawSAD_joint_embLTT.pt")
-            
-    return wait_times, train_times, max(ram_measurements, default=0.0)
+        
+    if benchmark_run:
+        return {
+            "train_ids": n_train_seen,
+            "first_batch_wait_s": wait_times[0],
+            "later_batch_wait_s": sum(wait_times[1:]),
+            "train_steps_s": sum(train_times),
+            "val_embSAD": val_loss_embSAD,
+            "val_embSAD_embLTT": val_loss_embSAD_joint_embLTT,
+            "val_rawSAD": val_loss_rawSAD,
+            "val_rawSAD_embLTT": val_loss_rawSAD_joint_embLTT,
+        }
+        
+    return wait_times, train_times
