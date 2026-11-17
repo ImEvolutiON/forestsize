@@ -1,11 +1,12 @@
-import time
 import numpy as np
 import torch
+import time
 from sbi.neural_nets import posterior_nn
 from torch.utils.data import Dataset, DataLoader
 from forestsize.simulation import SumStat
 from forestsize.parameters import SAMPLE_SIZE
 from forestsize.encoders import EncoderSAD, EncoderLTT, ConcatFeatures
+
 
 
 
@@ -38,9 +39,23 @@ class EcoEvoModel(torch.nn.Module):
     def loss(self, theta, features):
         embedding = self.embedding_net(features)                   # Compute embeddings from the features of the current batch
         loss = self.normalizing_flow.loss(theta, embedding).mean() # Mean NPE loss over the batch
-        return loss    
+        return loss  
+       
+    
 
-def ModelTraining(n_train=100, n_val=20, n_epochs=2, n_workers=0, batch_size=8, prefetch_factor=2, *, benchmark_run=False):
+
+def ModelTraining(n_train=100, n_val=20, *, n_workers=0, batch_size=8, prefetch_factor=2, benchmark_run=False):
+    
+    if type(n_train) is not int or n_train < 1:
+        raise ValueError("n_train must be a positive integer")
+    if type(n_val) is not int or n_val < 1:
+        raise ValueError("n_val must be a positive integer")
+    if type(batch_size) is not int or batch_size < 1:
+        raise ValueError("batch_size must be a positive integer")
+    if type(n_workers) is not int or n_workers < 0:
+        raise ValueError("n_workers must be a non-negative integer")
+    if n_workers > 0 and (type(prefetch_factor) is not int or prefetch_factor < 1):
+        raise ValueError("prefetch_factor must be positive when workers are used")
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
@@ -116,67 +131,146 @@ def ModelTraining(n_train=100, n_val=20, n_epochs=2, n_workers=0, batch_size=8, 
     best_val_rawSAD = float("inf")
     best_val_rawSAD_joint_embLTT = float("inf")
     
-    wait_times = []
-    train_times = []
-    n_train_seen = 0
+    EcoEvo_embSAD.train()
+    EcoEvo_embSAD_joint_embLTT.train()
+    EcoEvo_rawSAD.train()
+    EcoEvo_rawSAD_joint_embLTT.train()
     
-    # Epoch     
-    for epoch in range(n_epochs):      
-        
-        EcoEvo_embSAD.train()
-        EcoEvo_embSAD_joint_embLTT.train()
-        EcoEvo_rawSAD.train()
-        EcoEvo_rawSAD_joint_embLTT.train()
-        
-        # Initiate Datasets
-        train_ids = range(2*epoch*n_train, 2*(epoch+1)*n_train, 2)
-        train_dataset = SimDataset(train_ids)
-            
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=batch_size,
-            num_workers=n_workers,
-            shuffle=True,
-            drop_last=True,
-            collate_fn=list,
-            prefetch_factor=prefetch_factor if n_workers > 0 else None)
-        
-        # Performance timers
-        wait_start = time.perf_counter()
-        
-        # Batch
-        for batch in train_loader:
-            
-            wait_time = time.perf_counter() - wait_start # time to fill a batch
-            wait_times.append(wait_time)
-            
-            batch = [simulation for simulation in batch if simulation is not None]
+    # Initiate Datasets
+    train_ids = range(0, 2 * n_train, 2)
     
-            if not batch:
-                continue
+    train_dataset = SimDataset(train_ids)
+        
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        num_workers=n_workers,
+        shuffle=True,
+        drop_last=False, # A VOIR SI JE DOIS DROP LE BATCH INCOMPLET
+        collate_fn=list,
+        prefetch_factor=prefetch_factor if n_workers > 0 else None)
     
+    if benchmark_run:
+        first_batch_wait = 0.0 # initiate time spent for the first batch and initiating workers
+        later_batches_wait = 0.0 # initiate time spent for remaining batches (sum of batch_wait)
+        batches_received = 0 # count batches already delivered to the training loop
+        batch_wait_started_at = time.perf_counter() # Start the request of the GPU
+        
+    # Batch
+    for batch in train_loader:
+        
+        if benchmark_run:
+            batch_wait = time.perf_counter() - batch_wait_started_at # measure the wait for this delivered batch (batch_wait_started_at is reset at the end of the loop)
+            if batches_received == 0:
+                first_batch_wait = batch_wait # measure time spent for the first batch and initiating workers
+            else:
+                later_batches_wait += batch_wait # aggregate time spent for remaining batches
+            batches_received += 1 # count batches
+                
+        batch = [simulation for simulation in batch if simulation is not None]
+
+        if not batch:
+            continue
+
+        # Data curations
+        theta, train_SAD, train_LTT = zip(*batch) # train_G, train_T,
+            # transforms the list batch = 
+            # [(theta_1, G_1, T_1, SAD_1, LTT_1),
+            #  (theta_2, G_2, T_2, SAD_2, LTT_2),
+            #  ...]
+            #
+            # into tuples grouped by information level
+            # theta = (theta_1, theta_2, ...)
+            # SAD = (SAD_1, SAD_2, ...)
+            # T = (T_1, T_2, ...)
+        
+        # Data curation
+        train_SAD = torch.as_tensor(
+            np.stack(train_SAD),
+            dtype=torch.float32,
+            device=device)
+            # each SAD_i NumPy array of shape (SAMPLE_SIZE,)
+            # np.stack(SAD) combines them into a single array of shape
+            # (batch_size, SAMPLE_SIZE) with one simulation per row
+            # Then convertion to tensor
+        train_SAD = torch.log1p(train_SAD)
+        
+        theta = torch.as_tensor(
+            np.stack(theta),
+            dtype=torch.float32,
+            device=device)
+        
+        theta_scaled = (theta-theta_mean)/theta_std
+
+        train_LTT_padded = np.zeros((len(train_LTT), SAMPLE_SIZE), dtype=np.float32)
+        for line, ltt in enumerate(train_LTT):
+            train_LTT_padded[line, :len(ltt)] = np.log1p(ltt) # we fill each full-0 line in LTT_padded
+                                                        # with a log1p(ltt) going from first date
+                                                        # to len(ltt) and keeping full-0 padding
+                                                        
+        train_LTT = torch.as_tensor(
+            train_LTT_padded,
+            dtype=torch.float32,
+            device=device).unsqueeze(1)
+        
+        # Pass batch_embSAD to models
+        optim_embSAD.zero_grad() # reset gradients
+        loss_embSAD = EcoEvo_embSAD.loss(theta_scaled, train_SAD) # pass SAD -> EncoderSAD -> NPE loss by comparing embedded parameters to real standardised parameters
+        loss_embSAD.backward() # compute gradient
+        optim_embSAD.step() # update weights of both networks
+        
+        # Pass batch_embSAD_embLTT_joint to models
+        optim_embSAD_joint_embLTT.zero_grad() # reset gradients
+        loss_embSAD_joint_embLTT = EcoEvo_embSAD_joint_embLTT.loss(theta_scaled, (train_SAD, train_LTT)) # pass LTT -> EncoderLTT -> embedding (LTT) -> NPE posterior conditionned on embedding
+        loss_embSAD_joint_embLTT.backward() # compute gradient
+        optim_embSAD_joint_embLTT.step() # update weights of both networks
+        
+        # Pass batch_rawSAD to models
+        optim_rawSAD.zero_grad() # reset gradients
+        loss_rawSAD = EcoEvo_rawSAD.loss(theta_scaled, train_SAD) # pass SAD -> EncoderSAD -> NPE loss by comparing embedded parameters to real standardised parameters
+        loss_rawSAD.backward() # compute gradient
+        optim_rawSAD.step() # update weights of both networks
+        
+        # Pass batch_rawSAD_embLTT_joint to models
+        optim_rawSAD_joint_embLTT.zero_grad() # reset gradients
+        loss_rawSAD_joint_embLTT = EcoEvo_rawSAD_joint_embLTT.loss(theta_scaled, (train_SAD, train_LTT)) # pass LTT -> EncoderLTT -> embedding (LTT) -> NPE posterior conditionned on embedding
+        loss_rawSAD_joint_embLTT.backward() # compute gradient
+        optim_rawSAD_joint_embLTT.step() # update weights of both networks
+
+
+        print(f"Train loss embedding SAD: {loss_embSAD.item():.4f} | "
+            f"Train loss embedding SAD + embedding LTT: {loss_embSAD_joint_embLTT.item():.4f} | "
+            f"Train loss raw SAD: {loss_rawSAD.item():.4f} | "
+            f"Train loss raw SAD + embedding LTT: {loss_rawSAD_joint_embLTT.item():.4f}")
+        
+        if benchmark_run:
+            batch_wait_started_at = time.perf_counter() # start the next wait after training for next batch
+           
+    # Validation    
+    # Disable training behaviour of the models
+    EcoEvo_embSAD.eval()
+    EcoEvo_embSAD_joint_embLTT.eval()
+    EcoEvo_rawSAD.eval()
+    EcoEvo_rawSAD_joint_embLTT.eval()
+    
+    # Initialise cumulative validation losses
+    val_loss_embSAD = 0.0
+    val_loss_embSAD_joint_embLTT = 0.0
+    val_loss_rawSAD = 0.0
+    val_loss_rawSAD_joint_embLTT = 0.0
+    n_val_processed = 0
+    
+    # Disable gradient computation during validation
+    with torch.no_grad():
+        for batch in val_loader:
+            
             # Data curations
-            theta, train_SAD, train_LTT = zip(*batch) # train_G, train_T,
-                # transforms the list batch = 
-                # [(theta_1, G_1, T_1, SAD_1, LTT_1),
-                #  (theta_2, G_2, T_2, SAD_2, LTT_2),
-                #  ...]
-                #
-                # into tuples grouped by information level
-                # theta = (theta_1, theta_2, ...)
-                # SAD = (SAD_1, SAD_2, ...)
-                # T = (T_1, T_2, ...)
-            
-            # Data curation
-            train_SAD = torch.as_tensor(
-                np.stack(train_SAD),
+            theta, val_SAD, val_LTT = zip(*batch) # val_G, val_T,
+            val_SAD = torch.as_tensor(
+                np.stack(val_SAD),
                 dtype=torch.float32,
                 device=device)
-                # each SAD_i NumPy array of shape (SAMPLE_SIZE,)
-                # np.stack(SAD) combines them into a single array of shape
-                # (batch_size, SAMPLE_SIZE) with one simulation per row
-                # Then convertion to tensor
-            train_SAD = torch.log1p(train_SAD)
+            val_SAD = torch.log1p(val_SAD)
             
             theta = torch.as_tensor(
                 np.stack(theta),
@@ -184,167 +278,62 @@ def ModelTraining(n_train=100, n_val=20, n_epochs=2, n_workers=0, batch_size=8, 
                 device=device)
             
             theta_scaled = (theta-theta_mean)/theta_std
-    
-            train_LTT_padded = np.zeros((len(train_LTT), SAMPLE_SIZE), dtype=np.float32)
-            for line, ltt in enumerate(train_LTT):
-                train_LTT_padded[line, :len(ltt)] = np.log1p(ltt) # we fill each full-0 line in LTT_padded
-                                                            # with a log1p(ltt) going from first date
-                                                            # to len(ltt) and keeping full-0 padding
-                                                            
-            train_LTT = torch.as_tensor(
-                train_LTT_padded,
+
+            val_LTT_padded = np.zeros((len(val_LTT), SAMPLE_SIZE), dtype=np.float32)
+            
+            for line, ltt in enumerate(val_LTT):
+                val_LTT_padded[line, :len(ltt)] = np.log1p(ltt)
+            
+            val_LTT = torch.as_tensor(
+                val_LTT_padded,
                 dtype=torch.float32,
                 device=device).unsqueeze(1)
             
-            if device.type == "cuda":
-                torch.cuda.synchronize(device)
-            train_start = time.perf_counter()
+            # Compute the mean loss of each model on the current validation batch
+            loss_embSAD = EcoEvo_embSAD.loss(theta_scaled, val_SAD)
+            loss_embSAD_joint_embLTT = EcoEvo_embSAD_joint_embLTT.loss(theta_scaled, (val_SAD, val_LTT))
+            loss_rawSAD = EcoEvo_rawSAD.loss(theta_scaled, val_SAD)
+            loss_rawSAD_joint_embLTT = EcoEvo_rawSAD_joint_embLTT.loss(theta_scaled, (val_SAD, val_LTT))
             
+            # Accumulate losses weighted by the number of simulations in the batch
+            n_batch = len(batch)
+            val_loss_embSAD += loss_embSAD.item() * n_batch
+            val_loss_embSAD_joint_embLTT += loss_embSAD_joint_embLTT.item() * n_batch
+            val_loss_rawSAD += loss_rawSAD.item() * n_batch
+            val_loss_rawSAD_joint_embLTT += loss_rawSAD_joint_embLTT.item() * n_batch
             
-            # Pass batch_embSAD to models
-            optim_embSAD.zero_grad() # reset gradients
-            loss_embSAD = EcoEvo_embSAD.loss(theta_scaled, train_SAD) # pass SAD -> EncoderSAD -> NPE loss by comparing embedded parameters to real standardised parameters
-            loss_embSAD.backward() # compute gradient
-            optim_embSAD.step() # update weights of both networks
-            
-            # Pass batch_embSAD_embLTT_joint to models
-            optim_embSAD_joint_embLTT.zero_grad() # reset gradients
-            loss_embSAD_joint_embLTT = EcoEvo_embSAD_joint_embLTT.loss(theta_scaled, (train_SAD, train_LTT)) # pass LTT -> EncoderLTT -> embedding (LTT) -> NPE posterior conditionned on embedding
-            loss_embSAD_joint_embLTT.backward() # compute gradient
-            optim_embSAD_joint_embLTT.step() # update weights of both networks
-            
-            # Pass batch_rawSAD to models
-            optim_rawSAD.zero_grad() # reset gradients
-            loss_rawSAD = EcoEvo_rawSAD.loss(theta_scaled, train_SAD) # pass SAD -> EncoderSAD -> NPE loss by comparing embedded parameters to real standardised parameters
-            loss_rawSAD.backward() # compute gradient
-            optim_rawSAD.step() # update weights of both networks
-            
-            # Pass batch_rawSAD_embLTT_joint to models
-            optim_rawSAD_joint_embLTT.zero_grad() # reset gradients
-            loss_rawSAD_joint_embLTT = EcoEvo_rawSAD_joint_embLTT.loss(theta_scaled, (train_SAD, train_LTT)) # pass LTT -> EncoderLTT -> embedding (LTT) -> NPE posterior conditionned on embedding
-            loss_rawSAD_joint_embLTT.backward() # compute gradient
-            optim_rawSAD_joint_embLTT.step() # update weights of both networks
-            
-            n_train_seen += len(batch)
-
-            if device.type == "cuda":
-                torch.cuda.synchronize(device)
-            train_time = time.perf_counter() - train_start
-            train_times.append(train_time)
-
-            print(f"Epoch {epoch+1}/{n_epochs} | "
-                f"Train loss embedding SAD: {loss_embSAD.item():.4f} | "
-                f"Train loss embedding SAD + embedding LTT: {loss_embSAD_joint_embLTT.item():.4f} | "
-                f"Train loss raw SAD: {loss_rawSAD.item():.4f} | "
-                f"Train loss raw SAD + embedding LTT: {loss_rawSAD_joint_embLTT.item():.4f}")
+            n_val_processed += n_batch
         
-            wait_start = time.perf_counter()
+        if n_val_processed == 0:
+            raise RuntimeError("No validation simulation processed")
         
-        # Validation
-        # After all batches are done, do one val check for the epoch
+        # Mean losses over all validations
+        val_loss_embSAD /= n_val_processed
+        val_loss_embSAD_joint_embLTT /= n_val_processed
+        val_loss_rawSAD /= n_val_processed
+        val_loss_rawSAD_joint_embLTT /= n_val_processed
         
-        # Disable training behaviour of the models
-        EcoEvo_embSAD.eval()
-        EcoEvo_embSAD_joint_embLTT.eval()
-        EcoEvo_rawSAD.eval()
-        EcoEvo_rawSAD_joint_embLTT.eval()
-        
-        # Initialise cumulative validation losses
-        val_loss_embSAD = 0.0
-        val_loss_embSAD_joint_embLTT = 0.0
-        val_loss_rawSAD = 0.0
-        val_loss_rawSAD_joint_embLTT = 0.0
-        n_val_processed = 0
-        
-        # Disable gradient computation during validation
-        with torch.no_grad():
-            for batch in val_loader:
-                
-                # Data curations
-                theta, val_SAD, val_LTT = zip(*batch) # val_G, val_T,
-                val_SAD = torch.as_tensor(
-                    np.stack(val_SAD),
-                    dtype=torch.float32,
-                    device=device)
-                val_SAD = torch.log1p(val_SAD)
-                
-                theta = torch.as_tensor(
-                    np.stack(theta),
-                    dtype=torch.float32,
-                    device=device)
-                
-                theta_scaled = (theta-theta_mean)/theta_std
+        print(f"Validation loss embedding SAD: {val_loss_embSAD:.4f}")
+        print(f"Validation loss embedding SAD + embedding LTT: {val_loss_embSAD_joint_embLTT:.4f}")
+        print(f"Validation loss raw SAD: {val_loss_rawSAD:.4f}")
+        print(f"Validation loss raw SAD + embedding LTT: {val_loss_rawSAD_joint_embLTT:.4f}")
     
-                val_LTT_padded = np.zeros((len(val_LTT), SAMPLE_SIZE), dtype=np.float32)
-                
-                for line, ltt in enumerate(val_LTT):
-                    val_LTT_padded[line, :len(ltt)] = np.log1p(ltt)
-                
-                val_LTT = torch.as_tensor(
-                    val_LTT_padded,
-                    dtype=torch.float32,
-                    device=device).unsqueeze(1)
-                
-                # Compute the mean loss of each model on the current validation batch
-                loss_embSAD = EcoEvo_embSAD.loss(theta_scaled, val_SAD)
-                loss_embSAD_joint_embLTT = EcoEvo_embSAD_joint_embLTT.loss(theta_scaled, (val_SAD, val_LTT))
-                loss_rawSAD = EcoEvo_rawSAD.loss(theta_scaled, val_SAD)
-                loss_rawSAD_joint_embLTT = EcoEvo_rawSAD_joint_embLTT.loss(theta_scaled, (val_SAD, val_LTT))
-                
-                # Accumulate losses weighted by the number of simulations in the batch
-                n_batch = len(batch)
-                val_loss_embSAD += loss_embSAD.item() * n_batch
-                val_loss_embSAD_joint_embLTT += loss_embSAD_joint_embLTT.item() * n_batch
-                val_loss_rawSAD += loss_rawSAD.item() * n_batch
-                val_loss_rawSAD_joint_embLTT += loss_rawSAD_joint_embLTT.item() * n_batch
-                
-                n_val_processed += n_batch
-            
-            if n_val_processed == 0:
-                raise RuntimeError("No validation simulation processed")
-            
-            # Mean losses over all validations
-            val_loss_embSAD /= n_val_processed
-            val_loss_embSAD_joint_embLTT /= n_val_processed
-            val_loss_rawSAD /= n_val_processed
-            val_loss_rawSAD_joint_embLTT /= n_val_processed
-            
-            print(f"Validation loss embedding SAD: {val_loss_embSAD:.4f}")
-            print(f"Validation loss embedding SAD + embedding LTT: {val_loss_embSAD_joint_embLTT:.4f}")
-            print(f"Validation loss raw SAD: {val_loss_rawSAD:.4f}")
-            print(f"Validation loss raw SAD + embedding LTT: {val_loss_rawSAD_joint_embLTT:.4f}")
-        
-        # Don't save weights if in benchmark_run
-        if benchmark_run:
-            continue
-        
-        # Save model weights when validation loss improves
-        if val_loss_embSAD < best_val_embSAD:
-            best_val_embSAD = val_loss_embSAD
-            torch.save(EcoEvo_embSAD.state_dict(), "best_embSAD.pt")            
-            
-        if val_loss_embSAD_joint_embLTT < best_val_embSAD_joint_embLTT:
-            best_val_embSAD_joint_embLTT = val_loss_embSAD_joint_embLTT
-            torch.save(EcoEvo_embSAD_joint_embLTT.state_dict(), "best_embSAD_joint_embLTT.pt")
-        
-        if val_loss_rawSAD < best_val_rawSAD:
-            best_val_rawSAD = val_loss_rawSAD
-            torch.save(EcoEvo_rawSAD.state_dict(), "best_rawSAD.pt")
-            
-        if val_loss_rawSAD_joint_embLTT < best_val_rawSAD_joint_embLTT:
-            best_val_rawSAD_joint_embLTT = val_loss_rawSAD_joint_embLTT
-            torch.save(EcoEvo_rawSAD_joint_embLTT.state_dict(), "best_rawSAD_joint_embLTT.pt")
-        
     if benchmark_run:
-        return {
-            "train_ids": n_train_seen,
-            "first_batch_wait_s": wait_times[0],
-            "later_batch_wait_s": sum(wait_times[1:]),
-            "train_steps_s": sum(train_times),
-            "val_embSAD": val_loss_embSAD,
-            "val_embSAD_embLTT": val_loss_embSAD_joint_embLTT,
-            "val_rawSAD": val_loss_rawSAD,
-            "val_rawSAD_embLTT": val_loss_rawSAD_joint_embLTT,
-        }
+        return first_batch_wait, later_batches_wait
         
-    return wait_times, train_times
+    # Save model weights when validation loss improves
+    if val_loss_embSAD < best_val_embSAD:
+        best_val_embSAD = val_loss_embSAD
+        torch.save(EcoEvo_embSAD.state_dict(), "best_embSAD.pt")            
+        
+    if val_loss_embSAD_joint_embLTT < best_val_embSAD_joint_embLTT:
+        best_val_embSAD_joint_embLTT = val_loss_embSAD_joint_embLTT
+        torch.save(EcoEvo_embSAD_joint_embLTT.state_dict(), "best_embSAD_joint_embLTT.pt")
+    
+    if val_loss_rawSAD < best_val_rawSAD:
+        best_val_rawSAD = val_loss_rawSAD
+        torch.save(EcoEvo_rawSAD.state_dict(), "best_rawSAD.pt")
+        
+    if val_loss_rawSAD_joint_embLTT < best_val_rawSAD_joint_embLTT:
+        best_val_rawSAD_joint_embLTT = val_loss_rawSAD_joint_embLTT
+        torch.save(EcoEvo_rawSAD_joint_embLTT.state_dict(), "best_rawSAD_joint_embLTT.pt")
